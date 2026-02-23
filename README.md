@@ -4,6 +4,7 @@
 [![Language: English](https://img.shields.io/badge/Language-English-blue.svg)](#-english)
 
 Simple and powerful tool to synchronize and manage your mod load order in **Euro Truck Simulator 2**.
+Preview: www.youtube.com/watch?v=5gX0EXThPKQ
 
 ---
 
@@ -42,4 +43,5 @@ Simple and powerful tool to synchronize and manage your mod load order in **Euro
 > **NOTE 2:** Use **Option 3** to delete backup files and save disk space.
 
 ---
+
 *Developed with ❤️ for the ETS2 Community.*
