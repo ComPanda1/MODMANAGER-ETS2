@@ -8,6 +8,10 @@ import datetime
 import threading
 import subprocess
 import urllib.request
+import ctypes
+import tempfile
+import atexit
+import signal
 
 # Attempt to import colorama for better colors
 # When compiled with PyInstaller, this will be bundled.
@@ -44,8 +48,11 @@ else:
     # If running as script
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-SII_DECRYPT_EXE = os.path.join(BASE_DIR, "SII_Decrypt.exe")
-SII_ZIP         = os.path.join(BASE_DIR, "SII_Decrypt.zip")
+# Create a temporary directory for tools that will be cleaned up on exit
+TEMP_DIR = tempfile.mkdtemp(prefix="ETS2_Manager_")
+
+SII_DECRYPT_EXE = os.path.join(TEMP_DIR, "SII_Decrypt.exe")
+SII_ZIP         = os.path.join(TEMP_DIR, "SII_Decrypt.zip")
 LIST_FILE       = os.path.join(BASE_DIR, "list.txt")
 ETS2_PROFILES_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Euro Truck Simulator 2", "profiles")
 
@@ -56,6 +63,15 @@ SII_TOOLS_URL = (
 
 GAME_PROCESS_NAME = "eurotrucks2.exe"
 
+# Structured logging configuration
+LOGS_DIR = os.path.join(BASE_DIR, "Logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+MAIN_LOG    = os.path.join(LOGS_DIR, "main.log")
+ERROR_LOG   = os.path.join(LOGS_DIR, "errors.log")
+WARN_LOG    = os.path.join(LOGS_DIR, "warnings.log")
+FATAL_LOG   = os.path.join(LOGS_DIR, "fatal_errors.log")
+
 # ---------------------------------------------------------------------------
 # BILINGUAL TEXTS
 # ---------------------------------------------------------------------------
@@ -63,12 +79,13 @@ GAME_PROCESS_NAME = "eurotrucks2.exe"
 LOCALIZATION = {
     "es": {
         "title"              : "ETS2 - Gestor de Mods",
-        "option_extract"     : "1. Extraer lista de Mods",
-        "option_apply"       : "2. Aplicar lista de Mods",
-        "option_backups"     : "3. Eliminar todos los Backups",
-        "option_exit"        : "4. Salir",
+        "option_extract"     : "Extraer lista de Mods",
+        "option_apply"       : "Aplicar lista de Mods",
+        "option_backups"     : "Eliminar todos los Backups",
+        "option_open_folder" : "Abrir carpeta de list.txt",
+        "option_exit"        : "Salir",
         "choose"             : "Elige una opción: ",
-        "invalid_choice"     : "Opción no válida. Elige 1, 2, 3 o 4.",
+        "invalid_choice"     : "Opción no válida. Elige de 1 a 5.",
         "setting_up"         : "Configurando entorno",
         "game_running"       : "ETS2 está abierto. Ciérralo antes de continuar.",
         "list_not_found"     : "No se encontró list.txt en la carpeta del script.",
@@ -114,12 +131,13 @@ LOCALIZATION = {
     },
     "en": {
         "title"              : "ETS2 - Mod Manager",
-        "option_extract"     : "1. Extract Mod List",
-        "option_apply"       : "2. Apply Mod List",
-        "option_backups"     : "3. Delete all Backups",
-        "option_exit"        : "4. Exit",
+        "option_extract"     : "Extract Mod List",
+        "option_apply"       : "Apply Mod List",
+        "option_backups"     : "Delete all Backups",
+        "option_open_folder" : "Open list.txt folder",
+        "option_exit"        : "Exit",
         "choose"             : "Choose an option: ",
-        "invalid_choice"     : "Invalid option. Choose 1, 2, 3 or 4.",
+        "invalid_choice"     : "Invalid option. Choose 1 to 5.",
         "setting_up"         : "Setting up environment",
         "game_running"       : "ETS2 is running. Please close it first.",
         "list_not_found"     : "list.txt not found in folder.",
@@ -171,6 +189,36 @@ current_lang = "es"
 # CONSOLE HELPERS
 # ---------------------------------------------------------------------------
 
+def log(message, level="INFO"):
+    """
+    Structured logging system.
+    Levels: INFO, WARN, ERROR, FATAL
+    """
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Remove ANSI escape sequences (colors) from the message
+        clean_msg = re.sub(r'\x1b\[[0-9;]*m', '', str(message))
+        log_entry = f"[{timestamp}] [{level.upper()}] {clean_msg}\n"
+        
+        # All logs go to main.log
+        with open(MAIN_LOG, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+            
+        # Specific routing based on level
+        if level.upper() == "ERROR":
+            with open(ERROR_LOG, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        elif level.upper() == "WARN":
+            with open(WARN_LOG, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        elif level.upper() == "FATAL":
+            with open(FATAL_LOG, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+            with open(ERROR_LOG, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+    except:
+        pass # Never let logging crash the app
+
 def translate(key):
     return LOCALIZATION[current_lang][key]
 
@@ -190,23 +238,56 @@ def draw_title_box(text):
     print(f"{Color.INFO}╚" + "═" * (width - 2) + "╝" + f"{Color.RESET}")
 
 def print_ok(msg):
+    log(f"OK: {msg}")
     print(f"  {Color.OK}✓  {Color.RESET}{msg}")
 
 def print_info(msg):
+    log(f"INFO: {msg}")
     print(f"  {Color.INFO}→  {Color.RESET}{msg}")
 
 def print_warn(msg):
+    log(f"WARN: {msg}")
     print(f"  {Color.WARN}⚠  {Color.RESET}{msg}")
 
 def print_error_msg(msg):
+    log(f"ERROR: {msg}", level="ERROR")
     print(f"\n  {Color.ERROR}✗  {msg}{Color.RESET}")
 
 def handle_fatal(key_or_msg):
     msg = translate(key_or_msg) if key_or_msg in LOCALIZATION[current_lang] else key_or_msg
+    log(f"FATAL: {msg}", level="FATAL")
     print(f"\n  {Color.ERROR}[ {translate('fatal_error')} ]{Color.RESET}")
     print(f"  {Color.ERROR}» {msg}{Color.RESET}")
     input(f"{Color.GRAY}{translate('press_enter')}{Color.RESET}")
+    # Cleanup is handled by atexit
     sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# CLEANUP HELPERS
+# ---------------------------------------------------------------------------
+
+def cleanup_temp():
+    """Removes the temporary tools directory on exit."""
+    if os.path.exists(TEMP_DIR):
+        try:
+            # We use rmtree to delete the folder and its contents
+            shutil.rmtree(TEMP_DIR, ignore_errors=True)
+            log(f"Temp directory cleaned: {TEMP_DIR}")
+        except Exception as e:
+            log(f"Error cleaning temp directory: {e}", level="ERROR")
+
+def signal_handler(sig, frame):
+    """Handles signals to ensure clean exit."""
+    sys.exit(0)
+
+# Register the cleanup function to run when the script exits
+atexit.register(cleanup_temp)
+
+# Catch common exit signals to ensure atexit is triggered
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+if hasattr(signal, 'SIGBREAK'):
+    signal.signal(signal.SIGBREAK, signal_handler)
 
 # ---------------------------------------------------------------------------
 # LOADING SPINNER
@@ -281,7 +362,9 @@ def initial_setup():
 
         if not errors:
             profile_file = _find_active_profile(errors)
-        time.sleep(4)
+        
+        # Reduced sleep time for better UX
+        time.sleep(1.5)
 
     if errors:
         for e in errors:
@@ -290,7 +373,9 @@ def initial_setup():
         sys.exit(1)
 
     print_ok(translate("tools_ready"))
-    print_info(f"{translate('profile_loaded')}: {Color.BOLD}{os.path.basename(os.path.dirname(profile_file))}{Color.RESET}")
+    if profile_file:
+        profile_name = os.path.basename(os.path.dirname(profile_file))
+        print_info(f"{translate('profile_loaded')}: {Color.BOLD}{profile_name}{Color.RESET}")
     print()
     time.sleep(0.5)
     return profile_file
@@ -307,7 +392,7 @@ def _extract_tools(errors):
     if errors or not os.path.isfile(SII_ZIP): return
     try:
         with zipfile.ZipFile(SII_ZIP, "r") as zf:
-            zf.extractall(BASE_DIR)
+            zf.extractall(TEMP_DIR)
     except zipfile.BadZipFile:
         errors.append(translate("invalid_zip"))
     finally:
@@ -319,16 +404,28 @@ def _find_active_profile(errors):
     if not os.path.isdir(ETS2_PROFILES_DIR):
         errors.append(translate("profiles_not_found"))
         return None
-    folders = [e.path for e in os.scandir(ETS2_PROFILES_DIR) if e.is_dir()]
-    if not folders:
+    
+    # Find all profile.sii files and detect the most recently modified one
+    profiles = []
+    try:
+        for entry in os.scandir(ETS2_PROFILES_DIR):
+            if entry.is_dir():
+                sii_path = os.path.join(entry.path, "profile.sii")
+                if os.path.isfile(sii_path):
+                    # Get modification time
+                    mtime = os.path.getmtime(sii_path)
+                    profiles.append((sii_path, mtime))
+    except Exception as e:
+        errors.append(f"Error accessing profiles: {e}")
+        return None
+
+    if not profiles:
         errors.append(translate("no_profiles"))
         return None
-    # Just take the first profile found for now
-    file_path = os.path.join(folders[0], "profile.sii")
-    if not os.path.isfile(file_path):
-        errors.append(translate("no_sii_file"))
-        return None
-    return file_path
+    
+    # Sort by modification time (newest first)
+    profiles.sort(key=lambda x: x[1], reverse=True)
+    return profiles[0][0]
 
 # ---------------------------------------------------------------------------
 # MAIN MENU
@@ -341,8 +438,9 @@ def main_menu(profile_file):
         print()
         print(f"  {Color.INFO}[1]{Color.RESET} {translate('option_extract')}")
         print(f"  {Color.INFO}[2]{Color.RESET} {translate('option_apply')}")
-        print(f"  {Color.WARN}[3]{Color.RESET} {translate('option_backups')}")
-        print(f"  {Color.ERROR}[4]{Color.RESET} {translate('option_exit')}")
+        print(f"  {Color.INFO}[3]{Color.RESET} {translate('option_open_folder')}")
+        print(f"  {Color.WARN}[4]{Color.RESET} {translate('option_backups')}")
+        print(f"  {Color.ERROR}[5]{Color.RESET} {translate('option_exit')}")
         print()
         draw_separator()
         choice = input(f"  {Color.BOLD}{translate('choose')}{Color.RESET}").strip()
@@ -352,8 +450,10 @@ def main_menu(profile_file):
         elif choice == "2":
             action_apply(profile_file)
         elif choice == "3":
-            action_clean_backups(profile_file)
+            action_open_folder()
         elif choice == "4":
+            action_clean_backups(profile_file)
+        elif choice == "5":
             clear_screen()
             print(f"\n  {Color.OK}{translate('goodbye')}{Color.RESET}\n")
             time.sleep(1)
@@ -368,7 +468,7 @@ def main_menu(profile_file):
 
 def action_extract(profile_file):
     clear_screen()
-    draw_title_box(translate("option_extract").split(". ")[1])
+    draw_title_box(translate("option_extract"))
     print()
 
     if not _handle_game_running():
@@ -384,8 +484,8 @@ def action_extract(profile_file):
     with open(LIST_FILE, "w", encoding="utf-8") as f:
         for line in mods: f.write(line + "\n")
 
-    with LoadingSpinner(translate("option_extract").split(". ")[1]):
-        time.sleep(4)
+    with LoadingSpinner(translate("option_extract")):
+        time.sleep(2)
 
     if was_encrypted:
         print_ok(translate("decrypted_ok"))
@@ -402,7 +502,7 @@ def action_extract(profile_file):
 
 def action_apply(profile_file):
     clear_screen()
-    draw_title_box(translate("option_apply").split(". ")[1])
+    draw_title_box(translate("option_apply"))
     print()
 
     if not _handle_game_running():
@@ -433,8 +533,8 @@ def action_apply(profile_file):
     if was_encrypted:
         _run_sii_decrypt(profile_file)
     
-    with LoadingSpinner(translate("option_apply").split(". ")[1]):
-        time.sleep(4)
+    with LoadingSpinner(translate("option_apply")):
+        time.sleep(2)
 
     if was_encrypted:
         print_ok(translate("decrypted_ok"))
@@ -452,7 +552,7 @@ def action_apply(profile_file):
 
 def action_clean_backups(profile_file):
     clear_screen()
-    draw_title_box(translate("option_backups").split(". ")[1])
+    draw_title_box(translate("option_backups"))
     print()
 
     profile_dir = os.path.dirname(profile_file)
@@ -477,6 +577,20 @@ def action_clean_backups(profile_file):
         print_ok(translate("backups_deleted"))
     
     input(translate("press_enter"))
+
+def action_open_folder():
+    """Opens the folder containing the script and list.txt"""
+    # Check if list.txt exists to inform the user
+    if not os.path.isfile(LIST_FILE):
+        print_warn(translate("list_not_found"))
+        time.sleep(1.5)
+    
+    try:
+        # On Windows, os.startfile is the most reliable way to open a folder
+        os.startfile(os.path.abspath(BASE_DIR))
+    except Exception as e:
+        print_error_msg(f"Could not open folder: {e}")
+        time.sleep(2)
 
 # ---------------------------------------------------------------------------
 # CORE LOGIC
@@ -580,10 +694,99 @@ def _read_file_lines(file_path):
 def _write_file_lines(file_path, lines):
     with open(file_path, "w", encoding="utf-8", newline="\n") as f: f.writelines(lines)
 
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def request_admin():
+    if not is_admin():
+        # Determine the correct executable and parameters for relaunch
+        if getattr(sys, 'frozen', False):
+            # If running as an EXE
+            executable = sys.executable
+            # In EXE mode, argv[0] is the EXE itself, so we only need the remaining args
+            params = ' '.join([f'"{arg}"' for arg in sys.argv[1:]])
+        else:
+            # If running as a script
+            executable = sys.executable
+            # In script mode, we need to pass the script path (argv[0]) and all other args
+            params = ' '.join([f'"{arg}"' for arg in sys.argv])
+        
+        # ShellExecuteW(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd)
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, params, None, 1)
+        sys.exit()
+
+def create_desktop_shortcut():
+    try:
+        # Determine the target path (EXE or Script)
+        if getattr(sys, 'frozen', False):
+            target_path = sys.executable
+        else:
+            target_path = os.path.abspath(sys.argv[0])
+            
+        shortcut_name = "ETS2 Mod Manager.lnk"
+        # Get path to Desktop folder
+        try:
+            # Better way to get Desktop path in Windows
+            desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop')
+        except KeyError:
+            # Fallback
+            desktop = os.path.expanduser("~/Desktop")
+            
+        shortcut_path = os.path.normpath(os.path.join(desktop, shortcut_name))
+
+        # If shortcut already exists, we skip creation
+        if os.path.exists(shortcut_path):
+            return
+
+        working_dir = os.path.dirname(target_path)
+        
+        # PowerShell command to create shortcut using double quotes for paths
+        # Using [char]34 for double quotes inside the command string
+        ps_command = (
+            f"$WshShell = New-Object -ComObject WScript.Shell; "
+            f"$Shortcut = $WshShell.CreateShortcut(\"{shortcut_path}\"); "
+            f"$Shortcut.TargetPath = \"{target_path}\"; "
+            f"$Shortcut.WorkingDirectory = \"{working_dir}\"; "
+            f"$Shortcut.Save()"
+        )
+        
+        # We use a subprocess call to PowerShell
+        subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_command], 
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        # Silently fail if shortcut creation fails to avoid interrupting the user
+        pass
+
 def main():
-    select_language()
-    profile_file = initial_setup()
-    main_menu(profile_file)
+    try:
+        log("--- INICIANDO SESIÓN / STARTING SESSION ---")
+        request_admin()
+        
+        # Only run these if we are admin (avoid double execution on relaunch)
+        if is_admin():
+            log("Privilegios de administrador confirmados.")
+            create_desktop_shortcut()
+            select_language()
+            profile_file = initial_setup()
+            if profile_file:
+                main_menu(profile_file)
+            else:
+                log("No se pudo cargar el perfil.", is_error=True)
+        else:
+            # This part should theoretically not be reached as request_admin() exits
+            pass
+            
+    except KeyboardInterrupt:
+        print(f"\n  {Color.WARN}Proceso cancelado por el usuario.{Color.RESET}")
+        sys.exit(0)
+    except Exception as e:
+        log(f"Unhandled Exception: {e}", level="FATAL")
+        import traceback
+        log(traceback.format_exc(), level="FATAL")
+        handle_fatal(str(e))
 
 if __name__ == "__main__":
     main()
